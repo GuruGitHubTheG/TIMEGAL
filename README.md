@@ -1,3 +1,5 @@
+# TIMEGAL
+
 Enjoy a new appreciation for Taito's 1985 classic, TIMEGAL! Have Reika spawn on your watch screen at customizable intervals! This watchface utilizes both the SEGA/MEGA-CD and arcade graphics, and has seven backgrounds from the original game.
 
 Features Include:
