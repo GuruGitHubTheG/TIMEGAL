@@ -144,7 +144,8 @@ static ClaySettings s_settings;
 #define NUM_BACKGROUNDS  7
 
 // ================== FRAME DURATION & RESOURCES (main) ==================
-#if defined(PBL_PLATFORM_APLITE)
+// ---------- CHANGED: Diorite now uses Aplite's frames & timing ----------
+#if defined(PBL_PLATFORM_APLITE) || defined(PBL_PLATFORM_DIORITE)
     #define FRAME_DURATION_MS 160
     static const uint32_t s_frame_resources[] = {
         RESOURCE_ID_F1,  RESOURCE_ID_F3,  RESOURCE_ID_F5,  RESOURCE_ID_F7,
@@ -176,15 +177,16 @@ static ClaySettings s_settings;
 #endif
 
 // ================== BT ANIMATION RESOURCES ==================
+// ---------- CHANGED: Diorite now uses Aplite's BT frames & timing ----------
 #if defined(PBL_PLATFORM_GABBRO)
     #define BT_FRAME_DURATION_MS   160
-#elif defined(PBL_PLATFORM_APLITE)
+#elif defined(PBL_PLATFORM_APLITE) || defined(PBL_PLATFORM_DIORITE)
     #define BT_FRAME_DURATION_MS   267
 #else
     #define BT_FRAME_DURATION_MS   (FRAME_DURATION_MS * 2)
 #endif
 
-#if defined(PBL_PLATFORM_APLITE)
+#if defined(PBL_PLATFORM_APLITE) || defined(PBL_PLATFORM_DIORITE)
     static const uint32_t s_bt_frame_resources[] = {
         RESOURCE_ID_BT_F0,
         RESOURCE_ID_BT_F2,
@@ -265,13 +267,7 @@ static int s_last_hour = -1;
 
 static AppTimer *s_delayed_vibe_timer = NULL;
 
-// Cached font bitmaps (Fix #6) - now loaded lazily
-static GBitmap *s_digit_bitmaps[10] = {0};
-static GBitmap *s_letter_bitmaps[3] = {0};
-static GBitmap *s_colon_bitmap = NULL;
-
-// Tracks whether the BT background is currently displayed
-static bool s_in_bt_mode = false;
+static bool s_bt_disconnected = false;   // NEW: tracks disconnected state for reconnect animation
 
 #if ENABLE_DEBUG
     static TextLayer *s_debug_layer;
@@ -307,7 +303,7 @@ static void prv_default_settings() {
     s_settings.leading_zeros = true;
     s_settings.ampm_position = 0;
     s_settings.animate_on_flick = false;
-    s_settings.bt_animation = true;
+    s_settings.bt_animation = false;
     
     // Display
     s_settings.show_battery = true;
@@ -335,7 +331,7 @@ static void prv_default_settings() {
     s_settings.play_sound_on_bt = false;
     s_settings.play_sound_every_hour = false;
     s_settings.sound_during_quiet_time = false;
-    s_settings.suppress_startup_sounds = true;
+    s_settings.suppress_startup_sounds = false;
 }
 
 #if ENABLE_DEBUG
@@ -581,7 +577,6 @@ static void bt_animation_start(void) {
         s_bt_animating = false;
         return;
     }
-    s_in_bt_mode = true;  // mark that BT screen is active
     layer_mark_dirty(bitmap_layer_get_layer(s_bg_layer));
 
     if (s_settings.frequency == 2) {
@@ -609,8 +604,6 @@ static void bt_animation_stop(void) {
         s_bt_timer = NULL;
     }
 
-    s_in_bt_mode = false;  // leaving BT screen
-
     if (!load_background(s_prev_bg_index)) {
         load_background(0);
         s_current_bg_index = 0;
@@ -631,17 +624,22 @@ static void bt_animation_stop(void) {
     s_bt_animating = false;
 }
 
-// ================== BLUETOOTH CALLBACK ==================
+// ================== BLUETOOTH CALLBACK (FIXED) ==================
 static void bt_connection_handler(bool connected) {
-    if (!connected && s_settings.bt_animation) {
-        if (!s_bt_animating) {
+    if (!connected) {
+        // Store the disconnected state so we can react on reconnect
+        s_bt_disconnected = true;
+        if (s_settings.bt_animation && !s_bt_animating) {
             bt_animation_start();
         }
-    } else if (connected) {
-        // If the BT screen is still showing (animation may have finished), restore normal display
-        if (s_in_bt_mode) {
+    } else {
+        // Reconnected: always stop any BT animation and restore normal background,
+        // then play main anime if not disabled.
+        if (s_bt_disconnected) {
+            s_bt_disconnected = false;
+            // Stop BT animation (safe to call even if already finished)
             bt_animation_stop();
-            // Resume normal animation unless static mode
+            // Restart main animation if it's not completely off
             if (s_settings.frequency != 2) {
                 start_animation_with_current_bg(false);
             }
@@ -649,7 +647,7 @@ static void bt_connection_handler(bool connected) {
     }
 }
 
-// ================== FONT HELPERS (Lazy‑loaded bitmaps) ==================
+// ================== FONT HELPERS (v3.0.0 style – no persistent caching) ==================
 static uint8_t get_char_width(int index, bool is_digit) {
     if (is_digit) {
         if (index == 1) return 11;
@@ -660,34 +658,14 @@ static uint8_t get_char_width(int index, bool is_digit) {
     }
 }
 
-static GBitmap* get_char_bitmap(int index, bool is_digit) {
-    if (is_digit) {
-        if (index < 0 || index >= 10) return NULL;
-        if (!s_digit_bitmaps[index]) {
-            s_digit_bitmaps[index] = gbitmap_create_with_resource(s_digit_resources[index]);
-            if (!s_digit_bitmaps[index]) {
-                APP_LOG(APP_LOG_LEVEL_ERROR, "Lazy load digit %d failed", index);
-            }
-        }
-        return s_digit_bitmaps[index];
-    } else {
-        if (index < 0 || index >= 3) return NULL;
-        if (!s_letter_bitmaps[index]) {
-            s_letter_bitmaps[index] = gbitmap_create_with_resource(s_letter_resources[index]);
-            if (!s_letter_bitmaps[index]) {
-                APP_LOG(APP_LOG_LEVEL_ERROR, "Lazy load letter %d failed", index);
-            }
-        }
-        return s_letter_bitmaps[index];
-    }
-}
-
 // ================== DRAW CLOCK ==================
-static void draw_character(GContext *ctx, GBitmap *bitmap, int x, int y) {
+static void draw_character(GContext *ctx, uint32_t resource_id, int x, int y) {
+    GBitmap *bitmap = gbitmap_create_with_resource(resource_id);
     if (!bitmap) return;
     GRect bounds = gbitmap_get_bounds(bitmap);
     int y_offset = (CHAR_HEIGHT - bounds.size.h) / 2;
     graphics_draw_bitmap_in_rect(ctx, bitmap, GRect(x, y + y_offset, bounds.size.w, bounds.size.h));
+    gbitmap_destroy(bitmap);
 }
 
 static void draw_time_string(GContext *ctx, struct tm *t) {
@@ -760,38 +738,33 @@ static void draw_time_string(GContext *ctx, struct tm *t) {
     int x = (screen_w - total_width) / 2;
     int y = (screen_h * 3 / 4) - (CHAR_HEIGHT / 2);
 
-    // Ensure colon bitmap is loaded
-    if (!s_colon_bitmap) {
-        s_colon_bitmap = gbitmap_create_with_resource(s_colon_resource);
-    }
-
     if (show_ampm && ampm_left) {
         int letter = is_pm ? 1 : 0;
-        draw_character(ctx, get_char_bitmap(letter, false), x, y);
+        draw_character(ctx, s_letter_resources[letter], x, y);
         x += get_char_width(letter, false) + LETTER_GAP;
-        draw_character(ctx, get_char_bitmap(2, false), x, y);
+        draw_character(ctx, s_letter_resources[2], x, y);
         x += get_char_width(2, false) + AM_PM_GAP;
     }
 
     if (s_settings.leading_zeros || display_hour >= 10) {
-        draw_character(ctx, get_char_bitmap(h_tens, true), x, y);
+        draw_character(ctx, s_digit_resources[h_tens], x, y);
         x += get_char_width(h_tens, true) + DIGIT_GAP;
     }
-    draw_character(ctx, get_char_bitmap(h_ones, true), x, y);
+    draw_character(ctx, s_digit_resources[h_ones], x, y);
     x += get_char_width(h_ones, true) + COLON_GAP;
-    draw_character(ctx, s_colon_bitmap, x, y);
+    draw_character(ctx, s_colon_resource, x, y);
     x += 5 + COLON_GAP;
-    draw_character(ctx, get_char_bitmap(m_tens, true), x, y);
+    draw_character(ctx, s_digit_resources[m_tens], x, y);
     x += get_char_width(m_tens, true) + DIGIT_GAP;
-    draw_character(ctx, get_char_bitmap(m_ones, true), x, y);
+    draw_character(ctx, s_digit_resources[m_ones], x, y);
     x += get_char_width(m_ones, true);
 
     if (show_ampm && !ampm_left) {
         int letter = is_pm ? 1 : 0;
         x += AM_PM_GAP;
-        draw_character(ctx, get_char_bitmap(letter, false), x, y);
+        draw_character(ctx, s_letter_resources[letter], x, y);
         x += get_char_width(letter, false) + LETTER_GAP;
-        draw_character(ctx, get_char_bitmap(2, false), x, y);
+        draw_character(ctx, s_letter_resources[2], x, y);
     }
 }
 
@@ -1496,7 +1469,7 @@ static void start_animation_silent() {
 }
 
 static void start_animation_with_current_bg(bool is_startup) {
-    s_startup_animation_pending = false;   // NEW: clear race flag
+    s_startup_animation_pending = false;   // clear race flag
 
     if (s_bt_animating) return;
     if (s_timer) {
@@ -1848,6 +1821,9 @@ static void start_animation_wrapper(void *data) {
 static void startup_timer_callback(void *data) {
     s_startup_pending = false;
 
+    // Record initial Bluetooth state (true if disconnected at startup)
+    s_bt_disconnected = !bluetooth_connection_service_peek();
+
     if (s_bt_animating) return;
 
     if (!bluetooth_connection_service_peek() && s_settings.bt_animation) {
@@ -1858,7 +1834,7 @@ static void startup_timer_callback(void *data) {
         } else {
             load_foreground_frame(0);
             s_current_frame = 0;
-            s_startup_animation_pending = true;   // NEW: prevent duplicate animation
+            s_startup_animation_pending = true;
             app_timer_register(100, start_animation_wrapper, (void*)true);
         }
     }
@@ -1887,8 +1863,6 @@ static void main_window_load(Window *window) {
     if (!s_arcade_font) {
         APP_LOG(APP_LOG_LEVEL_WARNING, "ARCADE_12 font failed to load, using fallback");
     }
-
-    // Bitmaps are now loaded on demand in get_char_bitmap() and draw_time_string()
 
     TextLayer *temp_layer = text_layer_create(GRect(0, 0, 100, 100));
     text_layer_set_font(temp_layer, s_arcade_font ? s_arcade_font : fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
@@ -1947,7 +1921,7 @@ static void main_window_load(Window *window) {
 static void main_window_appear(Window *window) {
     if (s_startup_pending) return;
 
-    // NEW: if startup is already scheduling an animation, don't interfere
+    // If startup is already scheduling an animation, don't interfere
     if (s_startup_animation_pending) {
         s_startup_animation_pending = false;
         return;
@@ -2000,24 +1974,6 @@ static void main_window_unload(Window *window) {
         s_active_wav = NULL;
     }
 #endif
-
-    // Clean up cached font bitmaps
-    for (int i = 0; i < 10; i++) {
-        if (s_digit_bitmaps[i]) {
-            gbitmap_destroy(s_digit_bitmaps[i]);
-            s_digit_bitmaps[i] = NULL;
-        }
-    }
-    for (int i = 0; i < 3; i++) {
-        if (s_letter_bitmaps[i]) {
-            gbitmap_destroy(s_letter_bitmaps[i]);
-            s_letter_bitmaps[i] = NULL;
-        }
-    }
-    if (s_colon_bitmap) {
-        gbitmap_destroy(s_colon_bitmap);
-        s_colon_bitmap = NULL;
-    }
 
     bitmap_layer_destroy(s_bg_layer);
     bitmap_layer_destroy(s_fg_layer);
