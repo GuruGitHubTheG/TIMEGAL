@@ -265,10 +265,13 @@ static int s_last_hour = -1;
 
 static AppTimer *s_delayed_vibe_timer = NULL;
 
-// Cached font bitmaps (Fix #6)
+// Cached font bitmaps (Fix #6) - now loaded lazily
 static GBitmap *s_digit_bitmaps[10] = {0};
 static GBitmap *s_letter_bitmaps[3] = {0};
 static GBitmap *s_colon_bitmap = NULL;
+
+// Tracks whether the BT background is currently displayed
+static bool s_in_bt_mode = false;
 
 #if ENABLE_DEBUG
     static TextLayer *s_debug_layer;
@@ -304,7 +307,7 @@ static void prv_default_settings() {
     s_settings.leading_zeros = true;
     s_settings.ampm_position = 0;
     s_settings.animate_on_flick = false;
-    s_settings.bt_animation = false;
+    s_settings.bt_animation = true;
     
     // Display
     s_settings.show_battery = true;
@@ -332,7 +335,7 @@ static void prv_default_settings() {
     s_settings.play_sound_on_bt = false;
     s_settings.play_sound_every_hour = false;
     s_settings.sound_during_quiet_time = false;
-    s_settings.suppress_startup_sounds = false;
+    s_settings.suppress_startup_sounds = true;
 }
 
 #if ENABLE_DEBUG
@@ -578,6 +581,7 @@ static void bt_animation_start(void) {
         s_bt_animating = false;
         return;
     }
+    s_in_bt_mode = true;  // mark that BT screen is active
     layer_mark_dirty(bitmap_layer_get_layer(s_bg_layer));
 
     if (s_settings.frequency == 2) {
@@ -605,6 +609,8 @@ static void bt_animation_stop(void) {
         s_bt_timer = NULL;
     }
 
+    s_in_bt_mode = false;  // leaving BT screen
+
     if (!load_background(s_prev_bg_index)) {
         load_background(0);
         s_current_bg_index = 0;
@@ -631,15 +637,19 @@ static void bt_connection_handler(bool connected) {
         if (!s_bt_animating) {
             bt_animation_start();
         }
-    } else if (connected && s_bt_animating) {
-        bt_animation_stop();
-        if (s_settings.frequency != 2) {
-            start_animation_with_current_bg(false);
+    } else if (connected) {
+        // If the BT screen is still showing (animation may have finished), restore normal display
+        if (s_in_bt_mode) {
+            bt_animation_stop();
+            // Resume normal animation unless static mode
+            if (s_settings.frequency != 2) {
+                start_animation_with_current_bg(false);
+            }
         }
     }
 }
 
-// ================== FONT HELPERS (Cached bitmaps – Fix #6) ==================
+// ================== FONT HELPERS (Lazy‑loaded bitmaps) ==================
 static uint8_t get_char_width(int index, bool is_digit) {
     if (is_digit) {
         if (index == 1) return 11;
@@ -652,9 +662,23 @@ static uint8_t get_char_width(int index, bool is_digit) {
 
 static GBitmap* get_char_bitmap(int index, bool is_digit) {
     if (is_digit) {
-        return (index >= 0 && index < 10) ? s_digit_bitmaps[index] : NULL;
+        if (index < 0 || index >= 10) return NULL;
+        if (!s_digit_bitmaps[index]) {
+            s_digit_bitmaps[index] = gbitmap_create_with_resource(s_digit_resources[index]);
+            if (!s_digit_bitmaps[index]) {
+                APP_LOG(APP_LOG_LEVEL_ERROR, "Lazy load digit %d failed", index);
+            }
+        }
+        return s_digit_bitmaps[index];
     } else {
-        return (index >= 0 && index < 3) ? s_letter_bitmaps[index] : NULL;
+        if (index < 0 || index >= 3) return NULL;
+        if (!s_letter_bitmaps[index]) {
+            s_letter_bitmaps[index] = gbitmap_create_with_resource(s_letter_resources[index]);
+            if (!s_letter_bitmaps[index]) {
+                APP_LOG(APP_LOG_LEVEL_ERROR, "Lazy load letter %d failed", index);
+            }
+        }
+        return s_letter_bitmaps[index];
     }
 }
 
@@ -735,6 +759,11 @@ static void draw_time_string(GContext *ctx, struct tm *t) {
 
     int x = (screen_w - total_width) / 2;
     int y = (screen_h * 3 / 4) - (CHAR_HEIGHT / 2);
+
+    // Ensure colon bitmap is loaded
+    if (!s_colon_bitmap) {
+        s_colon_bitmap = gbitmap_create_with_resource(s_colon_resource);
+    }
 
     if (show_ampm && ampm_left) {
         int letter = is_pm ? 1 : 0;
@@ -1859,23 +1888,7 @@ static void main_window_load(Window *window) {
         APP_LOG(APP_LOG_LEVEL_WARNING, "ARCADE_12 font failed to load, using fallback");
     }
 
-    // Cache font bitmaps
-    for (int i = 0; i < 10; i++) {
-        s_digit_bitmaps[i] = gbitmap_create_with_resource(s_digit_resources[i]);
-        if (!s_digit_bitmaps[i]) {
-            APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to cache digit %d bitmap", i);
-        }
-    }
-    for (int i = 0; i < 3; i++) {
-        s_letter_bitmaps[i] = gbitmap_create_with_resource(s_letter_resources[i]);
-        if (!s_letter_bitmaps[i]) {
-            APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to cache letter %d bitmap", i);
-        }
-    }
-    s_colon_bitmap = gbitmap_create_with_resource(s_colon_resource);
-    if (!s_colon_bitmap) {
-        APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to cache colon bitmap");
-    }
+    // Bitmaps are now loaded on demand in get_char_bitmap() and draw_time_string()
 
     TextLayer *temp_layer = text_layer_create(GRect(0, 0, 100, 100));
     text_layer_set_font(temp_layer, s_arcade_font ? s_arcade_font : fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
