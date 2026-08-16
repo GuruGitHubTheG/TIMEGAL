@@ -15,7 +15,7 @@
     #define DEBUG_FORCE_TIME      true
     #define DEBUG_TIME_HOUR       12
     #define DEBUG_TIME_MINUTE     34
-    #define DEBUG_FORCE_BT_ANIM   true
+    #define DEBUG_FORCE_BT_ANIM   false
 
     // ── Force settings (true = override, false = use stored) ─
     // Animation
@@ -52,26 +52,26 @@
     #define FORCE_FlashSide_VALUE          "1"
 
     // Haptics/Sound (new)
-    #define FORCE_VibrateOnAnimationType   false
+    #define FORCE_VibrateOnAnimationType   true
     #define FORCE_VibrateOnAnimationType_VALUE "1"
-    #define FORCE_VibrateOnBTDisconnectType false
+    #define FORCE_VibrateOnBTDisconnectType true
     #define FORCE_VibrateOnBTDisconnectType_VALUE "1"
     #define FORCE_VibrateEveryHourType     false
     #define FORCE_VibrateEveryHourType_VALUE "2"
-    #define FORCE_VibrateDuringQuietTime   false
+    #define FORCE_VibrateDuringQuietTime   true
     #define FORCE_VibrateDuringQuietTime_VALUE 1
-    #define FORCE_PlaySoundOnAnimation     false
+    #define FORCE_PlaySoundOnAnimation     true
     #define FORCE_PlaySoundOnAnimation_VALUE 1
-    #define FORCE_PlaySoundOnBTDisconnect  false
+    #define FORCE_PlaySoundOnBTDisconnect  true
     #define FORCE_PlaySoundOnBTDisconnect_VALUE 1
     #define FORCE_PlaySoundEveryHour       false
     #define FORCE_PlaySoundEveryHour_VALUE 1
-    #define FORCE_SoundDuringQuietTime     false
-    #define FORCE_SoundDuringQuietTime_VALUE 0
-    #define FORCE_SuppressStartupVibes     false
-    #define FORCE_SuppressStartupVibes_VALUE 1
-    #define FORCE_SuppressStartupSounds    false
-    #define FORCE_SuppressStartupSounds_VALUE 1
+    #define FORCE_SoundDuringQuietTime     true
+    #define FORCE_SoundDuringQuietTime_VALUE 1
+    #define FORCE_SuppressStartupVibes     true
+    #define FORCE_SuppressStartupVibes_VALUE 0
+    #define FORCE_SuppressStartupSounds    true
+    #define FORCE_SuppressStartupSounds_VALUE 0
 
     // Clock
     #define FORCE_ClockMode                false
@@ -259,6 +259,7 @@ static AppTimer *s_bt_timer = NULL;
 
 static bool s_startup_pending = true;
 static bool s_startup_animation_pending = false;   // NEW: startup race fix
+static bool s_startup_bt_handled = false;          // NEW: prevent duplicate BT startup
 
 static int s_phone_battery = -1;
 static bool s_phone_battery_known = false;
@@ -275,6 +276,7 @@ static bool s_bt_disconnected = false;   // NEW: tracks disconnected state for r
     static struct tm s_fake_time;
     static bool s_fake_time_toggle = false;
     static AppTimer *s_debug_timer = NULL;
+    static bool s_debug_animating = false;   // prevents tick handler from interfering with debug timer
 #endif
 
 // ================== FORWARD DECLARATIONS ==================
@@ -303,7 +305,7 @@ static void prv_default_settings() {
     s_settings.leading_zeros = true;
     s_settings.ampm_position = 0;
     s_settings.animate_on_flick = false;
-    s_settings.bt_animation = false;
+    s_settings.bt_animation = true;
     
     // Display
     s_settings.show_battery = true;
@@ -331,7 +333,7 @@ static void prv_default_settings() {
     s_settings.play_sound_on_bt = false;
     s_settings.play_sound_every_hour = false;
     s_settings.sound_during_quiet_time = false;
-    s_settings.suppress_startup_sounds = false;
+    s_settings.suppress_startup_sounds = true;
 }
 
 #if ENABLE_DEBUG
@@ -459,12 +461,17 @@ static int get_next_background() {
 
 // ================== LOAD FUNCTIONS ==================
 static bool load_background(int bg_index) {
+    // Clear layer first
+    bitmap_layer_set_bitmap(s_bg_layer, NULL);
     if (s_bg_bitmap) {
         gbitmap_destroy(s_bg_bitmap);
         s_bg_bitmap = NULL;
     }
     s_bg_bitmap = gbitmap_create_with_resource(s_bg_resources[bg_index]);
-    if (!s_bg_bitmap) return false;
+    if (!s_bg_bitmap) {
+        // layer already NULL, but we can be explicit
+        return false;
+    }
     bitmap_layer_set_bitmap(s_bg_layer, s_bg_bitmap);
     return true;
 }
@@ -472,13 +479,14 @@ static bool load_background(int bg_index) {
 static bool load_foreground_frame(int frame_index) {
     if (frame_index >= NUM_FRAMES) return false;
     uint32_t resource_id = s_frame_resources[frame_index];
+    // Clear layer first
+    bitmap_layer_set_bitmap(s_fg_layer, NULL);
     if (s_fg_bitmap) {
         gbitmap_destroy(s_fg_bitmap);
         s_fg_bitmap = NULL;
     }
     if (resource_id == 0) {
-        bitmap_layer_set_bitmap(s_fg_layer, NULL);
-        return true;
+        return true;   // layer already NULL
     }
     s_fg_bitmap = gbitmap_create_with_resource(resource_id);
     if (!s_fg_bitmap) {
@@ -497,6 +505,8 @@ static void load_last_frame() {
 
 // ================== BT ANIMATION LOAD / CONTROL ==================
 static bool bt_load_background(void) {
+    // Clear layer first
+    bitmap_layer_set_bitmap(s_bg_layer, NULL);
     if (s_bg_bitmap) {
         gbitmap_destroy(s_bg_bitmap);
         s_bg_bitmap = NULL;
@@ -509,6 +519,8 @@ static bool bt_load_background(void) {
 
 static bool bt_load_frame(int index) {
     if (index >= BT_NUM_FRAMES) return false;
+    // Clear layer first
+    bitmap_layer_set_bitmap(s_fg_layer, NULL);
     if (s_fg_bitmap) {
         gbitmap_destroy(s_fg_bitmap);
         s_fg_bitmap = NULL;
@@ -882,12 +894,17 @@ static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
                 snprintf(month_str, sizeof(month_str), "%d", t->tm_mon + 1);
         }
         if (s_settings.date_format == 1) {
+            // day‑month order
             if (s_settings.date_leading_zeros)
                 snprintf(second_line, sizeof(second_line), "%02d%c%s", t->tm_mday, sep, month_str);
             else
                 snprintf(second_line, sizeof(second_line), "%d%c%s", t->tm_mday, sep, month_str);
         } else {
-            snprintf(second_line, sizeof(second_line), "%s%c%02d", month_str, sep, t->tm_mday);
+            // month‑day order
+            if (s_settings.date_leading_zeros)
+                snprintf(second_line, sizeof(second_line), "%s%c%02d", month_str, sep, t->tm_mday);
+            else
+                snprintf(second_line, sizeof(second_line), "%s%c%d", month_str, sep, t->tm_mday);
         }
         has_second = true;
     } else if (content_type == 2) {
@@ -902,7 +919,10 @@ static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
         }
         has_second = true;
     } else if (content_type == 4) {
-        snprintf(second_line, sizeof(second_line), "%d SEC.", t->tm_sec);
+        if (s_settings.leading_zeros)
+            snprintf(second_line, sizeof(second_line), "%02d SEC.", t->tm_sec);
+        else
+            snprintf(second_line, sizeof(second_line), "%d SEC.", t->tm_sec);
         has_second = true;
     }
 
@@ -1355,6 +1375,9 @@ static void debug_timer_callback(void *data) {
     s_fake_time_toggle = !s_fake_time_toggle;
     layer_mark_dirty(s_clock_layer);
 
+    // Prevent tick handler from starting animations while debug is active
+    s_debug_animating = true;
+
     if (DEBUG_FORCE_BT_ANIM) {
         if (!s_bt_animating) {
             APP_LOG(APP_LOG_LEVEL_INFO, "Debug: Starting BT animation");
@@ -1556,7 +1579,12 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     #if ENABLE_DEBUG
         update_debug_text();
     #endif
-    
+
+    // If debug mode is forcing animations, do not start another one here
+    #if ENABLE_DEBUG
+        if (s_debug_animating) return;
+    #endif
+
     bool hour_feedback_played = false;
     
     if (units_changed & HOUR_UNIT) {
@@ -1804,10 +1832,13 @@ static void outbox_sent_callback(DictionaryIterator *iterator, void *context) {}
 // ================== CLEANUP ==================
 static void cleanup_bitmaps() {
     if (s_bg_bitmap) {
+        // Clear layer before destroying to be safe
+        bitmap_layer_set_bitmap(s_bg_layer, NULL);
         gbitmap_destroy(s_bg_bitmap);
         s_bg_bitmap = NULL;
     }
     if (s_fg_bitmap) {
+        bitmap_layer_set_bitmap(s_fg_layer, NULL);
         gbitmap_destroy(s_fg_bitmap);
         s_fg_bitmap = NULL;
     }
@@ -1821,6 +1852,11 @@ static void start_animation_wrapper(void *data) {
 static void startup_timer_callback(void *data) {
     s_startup_pending = false;
 
+    // If we already handled BT startup, do nothing else
+    if (s_startup_bt_handled) {
+        return;
+    }
+
     // Record initial Bluetooth state (true if disconnected at startup)
     s_bt_disconnected = !bluetooth_connection_service_peek();
 
@@ -1829,8 +1865,9 @@ static void startup_timer_callback(void *data) {
     if (!bluetooth_connection_service_peek() && s_settings.bt_animation) {
         bt_animation_start();
     } else {
+        // If animations are off, the last frame is already loaded in main_window_load.
         if (s_settings.frequency == 2) {
-            load_last_frame();
+            // Nothing to do – GAL already visible.
         } else {
             load_foreground_frame(0);
             s_current_frame = 0;
@@ -1905,7 +1942,19 @@ static void main_window_load(Window *window) {
 
     load_background(initial_bg);
     s_current_bg_index = initial_bg;
-    
+
+    // If animations are completely off, show the final frame immediately
+    if (s_settings.frequency == 2) {
+        load_last_frame();
+    }
+
+    // If BT is already disconnected and BT animation is enabled, start it immediately
+    if (!bluetooth_connection_service_peek() && s_settings.bt_animation) {
+        s_bt_disconnected = true;
+        s_startup_bt_handled = true;
+        bt_animation_start();
+    }
+
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
     s_last_hour = t->tm_hour;
@@ -1955,6 +2004,7 @@ static void main_window_appear(Window *window) {
 }
 
 static void main_window_unload(Window *window) {
+    // Cancel timers
     if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
     if (s_bt_timer) { app_timer_cancel(s_bt_timer); s_bt_timer = NULL; }
     if (s_delayed_vibe_timer) {
@@ -1962,6 +2012,8 @@ static void main_window_unload(Window *window) {
         s_delayed_vibe_timer = NULL;
     }
     stop_flash_timer();
+
+    // Unsubscribe services
     accel_tap_service_unsubscribe();
     battery_state_service_unsubscribe();
     bluetooth_connection_service_unsubscribe();
@@ -1975,12 +2027,18 @@ static void main_window_unload(Window *window) {
     }
 #endif
 
+    // ✅ Clean up bitmaps FIRST – layers still exist, so safe
+    cleanup_bitmaps();
+
+    // Now destroy the layers
     bitmap_layer_destroy(s_bg_layer);
     bitmap_layer_destroy(s_fg_layer);
     layer_destroy(s_clock_layer);
+
     if (s_arcade_font) {
         fonts_unload_custom_font(s_arcade_font);
     }
+
 #if ENABLE_DEBUG
     if (s_debug_timer) {
         app_timer_cancel(s_debug_timer);
@@ -1988,7 +2046,6 @@ static void main_window_unload(Window *window) {
     }
     text_layer_destroy(s_debug_layer);
 #endif
-    cleanup_bitmaps();
 }
 
 // ================== INIT / DEINIT ==================
