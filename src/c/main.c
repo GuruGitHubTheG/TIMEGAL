@@ -10,9 +10,9 @@
 
 #if ENABLE_DEBUG
     // ── Standard debug options ──────────────────────────────
-    #define DEBUG_SHOW_INFO       false
+    #define DEBUG_SHOW_INFO       true
     #define DEBUG_FORCE_ANIM      -1
-    #define DEBUG_FORCE_TIME      true
+    #define DEBUG_FORCE_TIME      false
     #define DEBUG_TIME_HOUR       12
     #define DEBUG_TIME_MINUTE     34
     #define DEBUG_FORCE_BT_ANIM   false
@@ -52,25 +52,25 @@
     #define FORCE_FlashSide_VALUE          "1"
 
     // Haptics/Sound (new)
-    #define FORCE_VibrateOnAnimationType   true
+    #define FORCE_VibrateOnAnimationType   false
     #define FORCE_VibrateOnAnimationType_VALUE "1"
-    #define FORCE_VibrateOnBTDisconnectType true
+    #define FORCE_VibrateOnBTDisconnectType false
     #define FORCE_VibrateOnBTDisconnectType_VALUE "1"
     #define FORCE_VibrateEveryHourType     false
     #define FORCE_VibrateEveryHourType_VALUE "2"
-    #define FORCE_VibrateDuringQuietTime   true
+    #define FORCE_VibrateDuringQuietTime   false
     #define FORCE_VibrateDuringQuietTime_VALUE 1
-    #define FORCE_PlaySoundOnAnimation     true
+    #define FORCE_PlaySoundOnAnimation     false
     #define FORCE_PlaySoundOnAnimation_VALUE 1
-    #define FORCE_PlaySoundOnBTDisconnect  true
+    #define FORCE_PlaySoundOnBTDisconnect  false
     #define FORCE_PlaySoundOnBTDisconnect_VALUE 1
     #define FORCE_PlaySoundEveryHour       false
     #define FORCE_PlaySoundEveryHour_VALUE 1
-    #define FORCE_SoundDuringQuietTime     true
+    #define FORCE_SoundDuringQuietTime     false
     #define FORCE_SoundDuringQuietTime_VALUE 1
-    #define FORCE_SuppressStartupVibes     true
+    #define FORCE_SuppressStartupVibes     false
     #define FORCE_SuppressStartupVibes_VALUE 0
-    #define FORCE_SuppressStartupSounds    true
+    #define FORCE_SuppressStartupSounds    false
     #define FORCE_SuppressStartupSounds_VALUE 0
 
     // Clock
@@ -264,11 +264,21 @@ static bool s_startup_bt_handled = false;          // NEW: prevent duplicate BT 
 static int s_phone_battery = -1;
 static bool s_phone_battery_known = false;
 
+static char s_japanese_year[16] = "N/A";
+static bool s_japanese_year_known = false;
+
+static GFont s_japanese_font;
+
 static int s_last_hour = -1;
 
 static AppTimer *s_delayed_vibe_timer = NULL;
 
 static bool s_bt_disconnected = false;   // NEW: tracks disconnected state for reconnect animation
+
+// Compass globals
+static char s_compass_direction[8] = "N";   // e.g., "N", "NNE"
+static uint16_t s_compass_heading = 0;     // degrees 0-359, clockwise from north
+static bool s_compass_valid = false;
 
 #if ENABLE_DEBUG
     static TextLayer *s_debug_layer;
@@ -277,6 +287,8 @@ static bool s_bt_disconnected = false;   // NEW: tracks disconnected state for r
     static bool s_fake_time_toggle = false;
     static AppTimer *s_debug_timer = NULL;
     static bool s_debug_animating = false;   // prevents tick handler from interfering with debug timer
+    static Layer *s_debug_compass_layer;     // circular compass layer
+    static AppTimer *s_debug_compass_timer = NULL;  // fast update timer for debug
 #endif
 
 // ================== FORWARD DECLARATIONS ==================
@@ -286,6 +298,7 @@ static void start_animation_with_current_bg(bool is_startup);
 static void startup_timer_callback(void *data);
 #if ENABLE_DEBUG
     static void update_debug_text(void);
+    static void debug_compass_timer_callback(void *data);
 #endif
 static void cleanup_bitmaps(void);
 static void start_flash_timer(void);
@@ -296,6 +309,128 @@ static void play_feedback(int vibe_type, bool play_sound, bool allow_quiet_overr
 #if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_FLINT)
 static void play_wav_resource(uint32_t resource_id);
 #endif
+
+// ================== JAPANESE YEAR VALIDATION ==================
+// Allowed code points: ASCII, fullwidth digits, and known era kanji
+static const uint32_t s_allowed_jp_chars[] = {
+    0x660E, // 明
+    0x6CBB, // 治
+    0x5927, // 大
+    0x6B63, // 正
+    0x662D, // 昭
+    0x548C, // 和
+    0x5E73, // 平
+    0x6210, // 成
+    0x4EE4, // 令
+    0x5E74, // 年
+    0xFF10, 0xFF11, 0xFF12, 0xFF13, 0xFF14,
+    0xFF15, 0xFF16, 0xFF17, 0xFF18, 0xFF19, // fullwidth digits
+};
+
+static bool is_allowed_jp_codepoint(uint32_t cp) {
+    if (cp >= 0x20 && cp <= 0x7E) return true; // ASCII printable
+    for (uint32_t i = 0; i < ARRAY_LENGTH(s_allowed_jp_chars); i++) {
+        if (cp == s_allowed_jp_chars[i]) return true;
+    }
+    return false;
+}
+
+static bool is_valid_japanese_year(const char *str) {
+    if (!str || !str[0]) return false;
+    const unsigned char *p = (const unsigned char *)str;
+    while (*p) {
+        uint32_t cp = 0;
+        int len = 0;
+        if (*p < 0x80) {
+            cp = *p;
+            len = 1;
+        } else if ((*p & 0xE0) == 0xC0) {
+            cp = (*p & 0x1F) << 6;
+            cp |= (*(p+1) & 0x3F);
+            len = 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            cp = (*p & 0x0F) << 12;
+            cp |= (*(p+1) & 0x3F) << 6;
+            cp |= (*(p+2) & 0x3F);
+            len = 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            cp = (*p & 0x07) << 18;
+            cp |= (*(p+1) & 0x3F) << 12;
+            cp |= (*(p+2) & 0x3F) << 6;
+            cp |= (*(p+3) & 0x3F);
+            len = 4;
+        } else {
+            return false; // invalid UTF-8
+        }
+        if (!is_allowed_jp_codepoint(cp)) return false;
+        p += len;
+    }
+    return true;
+}
+
+// ================== JAPANESE YEAR FALLBACK ==================
+// Computes Japanese year for known eras (2010–2025). For 2026+ returns "N/A".
+static void get_japanese_year_fallback(struct tm *t, char *buffer, size_t size) {
+    int year = t->tm_year + 1900;
+    int month = t->tm_mon + 1;
+    int day = t->tm_mday;
+
+    // 2019 transition
+    if (year == 2019) {
+        if (month < 5 || (month == 5 && day < 1)) {
+            snprintf(buffer, size, "平成31年");
+        } else {
+            snprintf(buffer, size, "令和1年");
+        }
+        return;
+    }
+
+    // Heisei era (1989–2018)
+    if (year >= 1989 && year <= 2018) {
+        snprintf(buffer, size, "平成%d年", year - 1988);
+        return;
+    }
+
+    // Reiwa era (2020–2025)
+    if (year >= 2020 && year <= 2025) {
+        snprintf(buffer, size, "令和%d年", year - 2018);
+        return;
+    }
+
+    // Out of supported range (2026 and beyond)
+    snprintf(buffer, size, "N/A");
+}
+
+// ================== COMPASS HELPERS ==================
+// Convert clockwise degrees to 16-point direction
+static void compass_direction_str(uint16_t heading_deg, char *buffer, size_t size) {
+    static const char *directions[] = {
+        "N", "NNE", "NE", "ENE",
+        "E", "ESE", "SE", "SSE",
+        "S", "SSW", "SW", "WSW",
+        "W", "WNW", "NW", "NNW"
+    };
+    int index = ((int)heading_deg * 16 + 180) / 360;
+    index = index % 16;
+    strncpy(buffer, directions[index], size - 1);
+    buffer[size - 1] = '\0';
+}
+
+static void update_compass_direction(void) {
+    CompassHeadingData chd;
+    compass_service_peek(&chd);
+    if (chd.compass_status != CompassStatusDataInvalid) {
+        s_compass_valid = true;
+        // Convert counterclockwise angle to clockwise degrees
+        // and ensure modulo 360 (0-359)
+        s_compass_heading = (uint16_t)(TRIGANGLE_TO_DEG(TRIG_MAX_ANGLE - chd.true_heading) % 360);
+        compass_direction_str(s_compass_heading, s_compass_direction, sizeof(s_compass_direction));
+    } else {
+        s_compass_valid = false;
+        s_compass_heading = 0;
+        strcpy(s_compass_direction, "ADJUST");
+    }
+}
 
 // ================== SETTINGS HELPERS ==================
 static void prv_default_settings() {
@@ -461,7 +596,6 @@ static int get_next_background() {
 
 // ================== LOAD FUNCTIONS ==================
 static bool load_background(int bg_index) {
-    // Clear layer first
     bitmap_layer_set_bitmap(s_bg_layer, NULL);
     if (s_bg_bitmap) {
         gbitmap_destroy(s_bg_bitmap);
@@ -469,7 +603,6 @@ static bool load_background(int bg_index) {
     }
     s_bg_bitmap = gbitmap_create_with_resource(s_bg_resources[bg_index]);
     if (!s_bg_bitmap) {
-        // layer already NULL, but we can be explicit
         return false;
     }
     bitmap_layer_set_bitmap(s_bg_layer, s_bg_bitmap);
@@ -479,14 +612,13 @@ static bool load_background(int bg_index) {
 static bool load_foreground_frame(int frame_index) {
     if (frame_index >= NUM_FRAMES) return false;
     uint32_t resource_id = s_frame_resources[frame_index];
-    // Clear layer first
     bitmap_layer_set_bitmap(s_fg_layer, NULL);
     if (s_fg_bitmap) {
         gbitmap_destroy(s_fg_bitmap);
         s_fg_bitmap = NULL;
     }
     if (resource_id == 0) {
-        return true;   // layer already NULL
+        return true;
     }
     s_fg_bitmap = gbitmap_create_with_resource(resource_id);
     if (!s_fg_bitmap) {
@@ -505,7 +637,6 @@ static void load_last_frame() {
 
 // ================== BT ANIMATION LOAD / CONTROL ==================
 static bool bt_load_background(void) {
-    // Clear layer first
     bitmap_layer_set_bitmap(s_bg_layer, NULL);
     if (s_bg_bitmap) {
         gbitmap_destroy(s_bg_bitmap);
@@ -519,7 +650,6 @@ static bool bt_load_background(void) {
 
 static bool bt_load_frame(int index) {
     if (index >= BT_NUM_FRAMES) return false;
-    // Clear layer first
     bitmap_layer_set_bitmap(s_fg_layer, NULL);
     if (s_fg_bitmap) {
         gbitmap_destroy(s_fg_bitmap);
@@ -538,14 +668,13 @@ static void bt_animation_timer_callback(void *data) {
             s_bt_timer = app_timer_register(BT_FRAME_DURATION_MS,
                                             bt_animation_timer_callback, NULL);
         } else {
-            // Abort animation on frame load failure
             APP_LOG(APP_LOG_LEVEL_ERROR, "BT frame %d failed to load, aborting", s_bt_current_frame);
             s_bt_timer = NULL;
             bt_animation_stop();
         }
     } else {
         s_bt_timer = NULL;
-        s_bt_animating = false;   // sequence finished
+        s_bt_animating = false;
         APP_LOG(APP_LOG_LEVEL_INFO, "BT Animation finished");
     }
 }
@@ -639,19 +768,14 @@ static void bt_animation_stop(void) {
 // ================== BLUETOOTH CALLBACK (FIXED) ==================
 static void bt_connection_handler(bool connected) {
     if (!connected) {
-        // Store the disconnected state so we can react on reconnect
         s_bt_disconnected = true;
         if (s_settings.bt_animation && !s_bt_animating) {
             bt_animation_start();
         }
     } else {
-        // Reconnected: always stop any BT animation and restore normal background,
-        // then play main anime if not disabled.
         if (s_bt_disconnected) {
             s_bt_disconnected = false;
-            // Stop BT animation (safe to call even if already finished)
             bt_animation_stop();
-            // Restart main animation if it's not completely off
             if (s_settings.frequency != 2) {
                 start_animation_with_current_bg(false);
             }
@@ -659,7 +783,7 @@ static void bt_connection_handler(bool connected) {
     }
 }
 
-// ================== FONT HELPERS (v3.0.0 style – no persistent caching) ==================
+// ================== FONT HELPERS ==================
 static uint8_t get_char_width(int index, bool is_digit) {
     if (is_digit) {
         if (index == 1) return 11;
@@ -804,7 +928,6 @@ static struct tm *get_display_time(void) {
     return localtime(&now);
 }
 
-// Format small clock string (Fix #9: respect leading zeros)
 static void format_small_clock(char *buffer, size_t size, struct tm *t) {
     int hour = t->tm_hour;
     int minute = t->tm_min;
@@ -848,7 +971,7 @@ static void format_small_clock(char *buffer, size_t size, struct tm *t) {
     }
 }
 
-// ------------------------- HUD drawing helper (with custom heading) ---------------------------
+// ------------------------- HUD drawing helper ---------------------------
 static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
                            int content_type, int x_start, int top_y,
                            int block_width, int font_height,
@@ -857,21 +980,18 @@ static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
     if (content_type == 0) return;
 
     char heading[16] = {0};
-    char second_line[16] = {0};
+    char second_line[32] = {0};
     bool has_second = false;
 
     if (custom_heading && custom_heading[0] != '\0') {
         strncpy(heading, custom_heading, sizeof(heading) - 1);
     } else {
-        if (content_type == 1) {
-            strcpy(heading, "CURRENT");
-        } else if (content_type == 2) {
-            strcpy(heading, "WEEKDAY");
-        } else if (content_type == 3) {
-            strcpy(heading, "BATTERY");
-        } else if (content_type == 4) {
-            strcpy(heading, "SECONDS");
-        }
+        if (content_type == 1) strcpy(heading, "CURRENT");
+        else if (content_type == 2) strcpy(heading, "WEEKDAY");
+        else if (content_type == 3) strcpy(heading, "BATTERY");
+        else if (content_type == 4) strcpy(heading, "SECONDS");
+        else if (content_type == 5 || content_type == 6) strcpy(heading, "EMPEROR");
+        else if (content_type == 7) strcpy(heading, "COMPASS");
     }
 
     if (content_type == 1) {
@@ -894,13 +1014,11 @@ static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
                 snprintf(month_str, sizeof(month_str), "%d", t->tm_mon + 1);
         }
         if (s_settings.date_format == 1) {
-            // day‑month order
             if (s_settings.date_leading_zeros)
                 snprintf(second_line, sizeof(second_line), "%02d%c%s", t->tm_mday, sep, month_str);
             else
                 snprintf(second_line, sizeof(second_line), "%d%c%s", t->tm_mday, sep, month_str);
         } else {
-            // month‑day order
             if (s_settings.date_leading_zeros)
                 snprintf(second_line, sizeof(second_line), "%s%c%02d", month_str, sep, t->tm_mday);
             else
@@ -924,6 +1042,40 @@ static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
         else
             snprintf(second_line, sizeof(second_line), "%d SEC.", t->tm_sec);
         has_second = true;
+    } else if (content_type == 5) {
+        snprintf(second_line, sizeof(second_line), "AD %d", t->tm_year + 1900);
+        has_second = true;
+    } else if (content_type == 6) {
+        // Prefer watch's own date for known years (2010-2025)
+        char fallback_year[16];
+        get_japanese_year_fallback(t, fallback_year, sizeof(fallback_year));
+
+        if (strcmp(fallback_year, "N/A") != 0) {
+            // Use fallback (watch time)
+            strncpy(second_line, fallback_year, sizeof(second_line) - 1);
+            second_line[sizeof(second_line) - 1] = '\0';
+        } else if (s_japanese_year_known && strcmp(s_japanese_year, "N/A") != 0) {
+            // Fallback is N/A, use phone data (future years)
+            strncpy(second_line, s_japanese_year, sizeof(second_line) - 1);
+            second_line[sizeof(second_line) - 1] = '\0';
+        } else {
+            // No valid data at all
+            strcpy(second_line, "N/A");
+        }
+        has_second = true;
+    } else if (content_type == 7) {
+        // Compass: display heading degrees and direction
+        if (s_compass_valid) {
+            snprintf(second_line, sizeof(second_line), "%u %s", s_compass_heading, s_compass_direction);
+        } else {
+            strcpy(second_line, "ADJUST");
+        }
+        has_second = true;
+    }
+
+    GFont second_line_font = font;
+    if (content_type == 6) {
+        second_line_font = s_japanese_font ? s_japanese_font : fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
     }
 
     bool draw_heading = true;
@@ -948,11 +1100,11 @@ static void draw_hud_block(GContext *ctx, struct tm *t, GFont font,
     if (has_second) {
         int second_y = top_y + font_height;
         graphics_context_set_text_color(ctx, GColorBlack);
-        graphics_draw_text(ctx, second_line, font,
+        graphics_draw_text(ctx, second_line, second_line_font,
                            GRect(x_start + 1, second_y + 1, block_width, font_height),
                            GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
         graphics_context_set_text_color(ctx, date_color);
-        graphics_draw_text(ctx, second_line, font,
+        graphics_draw_text(ctx, second_line, second_line_font,
                            GRect(x_start, second_y, block_width, font_height),
                            GTextOverflowModeWordWrap, GTextAlignmentRight, NULL);
     }
@@ -1368,14 +1520,73 @@ static void update_debug_text() {
     if (display > NUM_FRAMES) display = NUM_FRAMES;
     snprintf(s_debug_text, sizeof(s_debug_text), "BG: %d%s  Frame: %d/%d (%s)\n%s",
              s_current_bg_index, forced, display, NUM_FRAMES, FRAME_LABEL, label);
+
+    // Add compass info with degree
+    if (s_compass_valid) {
+        snprintf(s_debug_text + strlen(s_debug_text), sizeof(s_debug_text) - strlen(s_debug_text),
+                 "\nCompass: %u %s", s_compass_heading, s_compass_direction);
+    } else {
+        snprintf(s_debug_text + strlen(s_debug_text), sizeof(s_debug_text) - strlen(s_debug_text),
+                 "\nCompass: ADJUST");
+    }
+
     text_layer_set_text(s_debug_layer, s_debug_text);
+}
+
+static void debug_compass_timer_callback(void *data) {
+    update_compass_direction();
+    layer_mark_dirty(s_debug_compass_layer);
+    if (DEBUG_SHOW_INFO) {
+        update_debug_text();
+    }
+    s_debug_compass_timer = app_timer_register(100, debug_compass_timer_callback, NULL);
+}
+
+static void debug_compass_update_proc(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+    GPoint center = grect_center_point(&bounds);
+    uint16_t radius = bounds.size.w / 2 - 2;
+
+    // Circle outline
+    graphics_context_set_stroke_color(ctx, GColorWhite);
+    graphics_context_set_stroke_width(ctx, 1);
+    graphics_draw_circle(ctx, center, radius);
+
+    // Tick marks for N, E, S, W
+    graphics_context_set_stroke_width(ctx, 2);
+    graphics_context_set_stroke_color(ctx, GColorWhite);
+    for (int i = 0; i < 4; i++) {
+        int32_t angle = TRIG_MAX_ANGLE * i / 4;  // 0, 90, 180, 270 degrees
+        GPoint tick_start = {
+            .x = center.x + (int16_t)(sin_lookup(angle) * (radius - 3) / TRIG_MAX_RATIO),
+            .y = center.y - (int16_t)(cos_lookup(angle) * (radius - 3) / TRIG_MAX_RATIO)
+        };
+        GPoint tick_end = {
+            .x = center.x + (int16_t)(sin_lookup(angle) * radius / TRIG_MAX_RATIO),
+            .y = center.y - (int16_t)(cos_lookup(angle) * radius / TRIG_MAX_RATIO)
+        };
+        graphics_draw_line(ctx, tick_start, tick_end);
+    }
+
+    // Needle: flip direction by using TRIG_MAX_ANGLE - true_heading
+    if (s_compass_valid) {
+        CompassHeadingData chd;
+        compass_service_peek(&chd);
+        int32_t needle_angle = TRIG_MAX_ANGLE - chd.true_heading;  // flip
+        GPoint needle_end = {
+            .x = center.x + (int16_t)(sin_lookup(needle_angle) * (radius - 5) / TRIG_MAX_RATIO),
+            .y = center.y - (int16_t)(cos_lookup(needle_angle) * (radius - 5) / TRIG_MAX_RATIO)
+        };
+        graphics_context_set_stroke_color(ctx, GColorRed);
+        graphics_context_set_stroke_width(ctx, 2);
+        graphics_draw_line(ctx, center, needle_end);
+    }
 }
 
 static void debug_timer_callback(void *data) {
     s_fake_time_toggle = !s_fake_time_toggle;
     layer_mark_dirty(s_clock_layer);
 
-    // Prevent tick handler from starting animations while debug is active
     s_debug_animating = true;
 
     if (DEBUG_FORCE_BT_ANIM) {
@@ -1492,7 +1703,7 @@ static void start_animation_silent() {
 }
 
 static void start_animation_with_current_bg(bool is_startup) {
-    s_startup_animation_pending = false;   // clear race flag
+    s_startup_animation_pending = false;
 
     if (s_bt_animating) return;
     if (s_timer) {
@@ -1574,13 +1785,23 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
         if (show_seconds) {
             layer_mark_dirty(s_clock_layer);
         }
+
+        // Update compass HUD once per second if compass is displayed
+        #if defined(PBL_PLATFORM_EMERY)
+            bool show_compass = (s_settings.hud_content_left == 7 || s_settings.hud_content_right == 7);
+        #else
+            bool show_compass = (s_settings.hud_content == 7);
+        #endif
+        if (show_compass) {
+            update_compass_direction();
+            layer_mark_dirty(s_clock_layer);
+        }
     }
 
     #if ENABLE_DEBUG
         update_debug_text();
     #endif
 
-    // If debug mode is forcing animations, do not start another one here
     #if ENABLE_DEBUG
         if (s_debug_animating) return;
     #endif
@@ -1653,19 +1874,19 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     Tuple *hud = dict_find(iterator, MESSAGE_KEY_HudContent);
     if (hud) {
         int val = atoi(hud->value->cstring);
-        if (val >= 0 && val <= 4) { s_settings.hud_content = val; changed = true; }
+        if (val >= 0 && val <= 7) { s_settings.hud_content = val; changed = true; }
     }
     
     Tuple *hud_left = dict_find(iterator, MESSAGE_KEY_HudContentLeft);
     if (hud_left) {
         int val = atoi(hud_left->value->cstring);
-        if (val >= 0 && val <= 4) { s_settings.hud_content_left = val; changed = true; }
+        if (val >= 0 && val <= 7) { s_settings.hud_content_left = val; changed = true; }
     }
     
     Tuple *hud_right = dict_find(iterator, MESSAGE_KEY_HudContentRight);
     if (hud_right) {
         int val = atoi(hud_right->value->cstring);
-        if (val >= 0 && val <= 4) { s_settings.hud_content_right = val; changed = true; }
+        if (val >= 0 && val <= 7) { s_settings.hud_content_right = val; changed = true; }
     }
     
     Tuple *current_right = dict_find(iterator, MESSAGE_KEY_CurrentRight);
@@ -1819,6 +2040,21 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         changed = true;
     }
 
+    Tuple *jp_year = dict_find(iterator, MESSAGE_KEY_JapaneseYear);
+    if (jp_year) {
+        const char *received = jp_year->value->cstring;
+        // Reject "N/A" or empty strings so fallback can be used
+        if (received && strcmp(received, "N/A") != 0 && is_valid_japanese_year(received)) {
+            strncpy(s_japanese_year, received, sizeof(s_japanese_year) - 1);
+            s_japanese_year[sizeof(s_japanese_year) - 1] = '\0';
+            s_japanese_year_known = true;
+        } else {
+            strcpy(s_japanese_year, "N/A");
+            s_japanese_year_known = false;   // Force fallback
+        }
+        changed = true;
+    }
+    
     if (changed) {
         prv_save_settings();
         layer_mark_dirty(s_clock_layer);
@@ -1832,7 +2068,6 @@ static void outbox_sent_callback(DictionaryIterator *iterator, void *context) {}
 // ================== CLEANUP ==================
 static void cleanup_bitmaps() {
     if (s_bg_bitmap) {
-        // Clear layer before destroying to be safe
         bitmap_layer_set_bitmap(s_bg_layer, NULL);
         gbitmap_destroy(s_bg_bitmap);
         s_bg_bitmap = NULL;
@@ -1852,12 +2087,10 @@ static void start_animation_wrapper(void *data) {
 static void startup_timer_callback(void *data) {
     s_startup_pending = false;
 
-    // If we already handled BT startup, do nothing else
     if (s_startup_bt_handled) {
         return;
     }
 
-    // Record initial Bluetooth state (true if disconnected at startup)
     s_bt_disconnected = !bluetooth_connection_service_peek();
 
     if (s_bt_animating) return;
@@ -1865,9 +2098,8 @@ static void startup_timer_callback(void *data) {
     if (!bluetooth_connection_service_peek() && s_settings.bt_animation) {
         bt_animation_start();
     } else {
-        // If animations are off, the last frame is already loaded in main_window_load.
         if (s_settings.frequency == 2) {
-            // Nothing to do – GAL already visible.
+            // Nothing to do
         } else {
             load_foreground_frame(0);
             s_current_frame = 0;
@@ -1901,6 +2133,11 @@ static void main_window_load(Window *window) {
         APP_LOG(APP_LOG_LEVEL_WARNING, "ARCADE_12 font failed to load, using fallback");
     }
 
+    s_japanese_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_JAPANESE_12));
+    if (!s_japanese_font) {
+        APP_LOG(APP_LOG_LEVEL_WARNING, "JAPANESE_12 font failed to load, using system fallback");
+    }
+
     TextLayer *temp_layer = text_layer_create(GRect(0, 0, 100, 100));
     text_layer_set_font(temp_layer, s_arcade_font ? s_arcade_font : fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_text(temp_layer, "G");
@@ -1912,6 +2149,9 @@ static void main_window_load(Window *window) {
     battery_state_service_subscribe(battery_callback);
     bluetooth_connection_service_subscribe(bt_connection_handler);
 
+    // Initial compass update
+    update_compass_direction();
+
 #if ENABLE_DEBUG
     s_debug_layer = text_layer_create(GRect(5, 5, bounds.size.w - 10, 50));
     text_layer_set_text_color(s_debug_layer, GColorWhite);
@@ -1922,6 +2162,16 @@ static void main_window_load(Window *window) {
     layer_set_hidden(text_layer_get_layer(s_debug_layer), !DEBUG_SHOW_INFO);
     if (DEBUG_SHOW_INFO) {
         update_debug_text();
+    }
+
+    s_debug_compass_layer = layer_create(GRect(bounds.size.w - 50, 5, 44, 44));
+    layer_set_update_proc(s_debug_compass_layer, debug_compass_update_proc);
+    layer_add_child(window_layer, s_debug_compass_layer);
+    layer_set_hidden(s_debug_compass_layer, !DEBUG_SHOW_INFO);
+
+    // Start fast compass update timer for debug
+    if (DEBUG_SHOW_INFO) {
+        s_debug_compass_timer = app_timer_register(100, debug_compass_timer_callback, NULL);
     }
 
     if (DEBUG_FORCE_TIME) {
@@ -1943,12 +2193,10 @@ static void main_window_load(Window *window) {
     load_background(initial_bg);
     s_current_bg_index = initial_bg;
 
-    // If animations are completely off, show the final frame immediately
     if (s_settings.frequency == 2) {
         load_last_frame();
     }
 
-    // If BT is already disconnected and BT animation is enabled, start it immediately
     if (!bluetooth_connection_service_peek() && s_settings.bt_animation) {
         s_bt_disconnected = true;
         s_startup_bt_handled = true;
@@ -1970,7 +2218,6 @@ static void main_window_load(Window *window) {
 static void main_window_appear(Window *window) {
     if (s_startup_pending) return;
 
-    // If startup is already scheduling an animation, don't interfere
     if (s_startup_animation_pending) {
         s_startup_animation_pending = false;
         return;
@@ -2004,7 +2251,6 @@ static void main_window_appear(Window *window) {
 }
 
 static void main_window_unload(Window *window) {
-    // Cancel timers
     if (s_timer) { app_timer_cancel(s_timer); s_timer = NULL; }
     if (s_bt_timer) { app_timer_cancel(s_bt_timer); s_bt_timer = NULL; }
     if (s_delayed_vibe_timer) {
@@ -2013,7 +2259,6 @@ static void main_window_unload(Window *window) {
     }
     stop_flash_timer();
 
-    // Unsubscribe services
     accel_tap_service_unsubscribe();
     battery_state_service_unsubscribe();
     bluetooth_connection_service_unsubscribe();
@@ -2027,10 +2272,8 @@ static void main_window_unload(Window *window) {
     }
 #endif
 
-    // ✅ Clean up bitmaps FIRST – layers still exist, so safe
     cleanup_bitmaps();
 
-    // Now destroy the layers
     bitmap_layer_destroy(s_bg_layer);
     bitmap_layer_destroy(s_fg_layer);
     layer_destroy(s_clock_layer);
@@ -2039,12 +2282,21 @@ static void main_window_unload(Window *window) {
         fonts_unload_custom_font(s_arcade_font);
     }
 
+    if (s_japanese_font) {
+      fonts_unload_custom_font(s_japanese_font);
+    }
+
 #if ENABLE_DEBUG
     if (s_debug_timer) {
         app_timer_cancel(s_debug_timer);
         s_debug_timer = NULL;
     }
+    if (s_debug_compass_timer) {
+        app_timer_cancel(s_debug_compass_timer);
+        s_debug_compass_timer = NULL;
+    }
     text_layer_destroy(s_debug_layer);
+    layer_destroy(s_debug_compass_layer);
 #endif
 }
 

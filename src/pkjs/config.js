@@ -54,9 +54,30 @@ module.exports = [
                     { "label": "Weekday (WEEKDAY)", "value": "2" },
                     { "label": "Seconds (SECONDS)", "value": "4" },
                     { "label": "Phone Battery (BATTERY)", "value": "3" },
+                    { "label": "Western Year (EMPEROR)", "value": "5" },
+                    { "label": "Japanese Year (EMPEROR)", "value": "6" },
+                    { "label": "Compass (COMPASS)", "value": "7" },
                     { "label": "Off", "value": "0" }
                 ],
-                "description": "Phone Battery only works if your phone's browser JavaScript environment exposes it. In the case it is unsupported, N/A will be shown."
+                "description": "If the compass shows ADJUST, you must calibrate the compass. Phone Battery only works if your phone's browser JavaScript environment exposes it. In the case it is unsupported, N/A will be shown.",
+                "capabilities": ["NOT_PLATFORM_DIORITE"]
+            },
+            {
+                "type": "select",
+                "messageKey": "HudContent",
+                "label": "Top HUD Content",
+                "defaultValue": "1",
+                "options": [
+                    { "label": "Current Date (CURRENT)", "value": "1" },
+                    { "label": "Weekday (WEEKDAY)", "value": "2" },
+                    { "label": "Seconds (SECONDS)", "value": "4" },
+                    { "label": "Phone Battery (BATTERY)", "value": "3" },
+                    { "label": "Western Year (EMPEROR)", "value": "5" },
+                    { "label": "Japanese Year (EMPEROR)", "value": "6" },
+                    { "label": "Off", "value": "0" }
+                ],
+                "description": "Phone Battery only works if your phone's browser JavaScript environment exposes it. In the case it is unsupported, N/A will be shown.",
+                "capabilities": ["PLATFORM_DIORITE"]
             },
             {
                 "type": "toggle",
@@ -104,6 +125,9 @@ module.exports = [
                     { "label": "Weekday (WEEKDAY)", "value": "2" },
                     { "label": "Seconds (SECONDS)", "value": "4" },
                     { "label": "Phone Battery (BATTERY)", "value": "3" },
+                    { "label": "Western Year (EMPEROR)", "value": "5" },
+                    { "label": "Japanese Year (EMPEROR)", "value": "6" },
+                    { "label": "Compass (COMPASS)", "value": "7" },
                     { "label": "Off", "value": "0" }
                 ]
             },
@@ -117,9 +141,12 @@ module.exports = [
                     { "label": "Weekday (WEEKDAY)", "value": "2" },
                     { "label": "Seconds (SECONDS)", "value": "4" },
                     { "label": "Phone Battery (BATTERY)", "value": "3" },
+                    { "label": "Western Year (EMPEROR)", "value": "5" },
+                    { "label": "Japanese Year (EMPEROR)", "value": "6" },
+                    { "label": "Compass (COMPASS)", "value": "7" },
                     { "label": "Off", "value": "0" }
                 ],
-                "description": "Phone Battery only works if your phone's browser JavaScript environment exposes it. In the case it is unsupported, N/A will be shown."
+                "description": "If the compass shows ADJUST, you must calibrate the compass. Phone Battery only works if your phone's browser JavaScript environment exposes it. In the case it is unsupported, N/A will be shown."
             },
             {
                 "type": "select",

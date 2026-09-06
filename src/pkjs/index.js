@@ -2,11 +2,8 @@ var Clay = require('@rebble/clay');
 var clayConfig = require('./config');
 var clay = new Clay(clayConfig);
 
-// ---------- Phone Battery ----------
-// We need a Promise polyfill if the Pebble JS runtime doesn't provide it.
-// Most modern runtimes do, but this is safe.
+// ---------- Promise polyfill (if needed) ----------
 if (typeof Promise === 'undefined') {
-  // A minimal polyfill (only what we need)
   window.Promise = function(executor) {
     var self = this;
     self._state = 'pending';
@@ -39,7 +36,10 @@ if (typeof Promise === 'undefined') {
             try { resolve(onRejected(self._value)); } catch (e) { reject(e); }
           } else { reject(self._value); }
         } else {
-          self._callbacks.push({ onFulfilled: function(v) { handle(); }, onRejected: function(r) { handle(); } });
+          self._callbacks.push({
+            onFulfilled: function(v) { handle(); },
+            onRejected: function(r) { handle(); }
+          });
         }
       }
       handle();
@@ -47,7 +47,7 @@ if (typeof Promise === 'undefined') {
   };
 }
 
-// Send phone battery to watch
+// ---------- Phone Battery ----------
 function sendPhoneBattery(level, charging) {
   Pebble.sendAppMessage({
     'PhoneBattLevel': level,
@@ -59,16 +59,13 @@ function sendPhoneBattery(level, charging) {
   });
 }
 
-// Set up battery monitoring
 function initPhoneBattery() {
   if (!navigator.getBattery) {
     console.warn('navigator.getBattery not available – phone battery won\'t be shown.');
     return;
   }
   navigator.getBattery().then(function(battery) {
-    // Send initial value
     sendPhoneBattery(Math.floor(battery.level * 100), battery.charging);
-    // Listen for changes
     battery.addEventListener('levelchange', function() {
       sendPhoneBattery(Math.floor(battery.level * 100), battery.charging);
     });
@@ -80,25 +77,62 @@ function initPhoneBattery() {
   });
 }
 
-// Optionally respond to watch requests for phone battery
+// ---------- Japanese Year ----------
+function fetchJapaneseYear() {
+  var year = new Date().getFullYear();
+  var url = 'https://seireki.teraren.com/seireki/' + year + '.json';
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.setRequestHeader('Accept', 'application/json');
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      try {
+        var data = JSON.parse(xhr.responseText);
+        if (data.wareki) {
+          var parts = data.wareki.split('または');
+          var latest = parts[parts.length - 1].trim();
+          Pebble.sendAppMessage({
+            'JapaneseYear': latest
+          }, function() {
+            console.log('Japanese year sent: ' + latest);
+          }, function(e) {
+            console.error('Failed to send Japanese year: ' + e);
+          });
+        }
+      } catch(e) {
+        console.error('Error parsing Japanese year response: ' + e);
+      }
+    } else {
+      console.error('Japanese year fetch failed with status ' + xhr.status);
+    }
+  };
+  xhr.onerror = function() {
+    console.error('Network error fetching Japanese year');
+  };
+  xhr.send();
+}
+
+// ---------- AppMessage listener ----------
 Pebble.addEventListener('appmessage', function(e) {
+  // Handle watch request for phone battery
   if (e.payload && e.payload.QUERY_PHONE_BATT) {
-    // If the watch asks, resend the latest known value.
-    // We don't store it, so we just query again.
     if (navigator.getBattery) {
       navigator.getBattery().then(function(battery) {
         sendPhoneBattery(Math.floor(battery.level * 100), battery.charging);
       });
     }
   }
+
+  // Handle watch request for Japanese year
+  if (e.payload && e.payload.QUERY_JAPANESE_YEAR) {
+    fetchJapaneseYear();
+  }
 });
 
-// Initialize phone battery when the watchface is ready
+// ---------- Ready event ----------
 Pebble.addEventListener('ready', function() {
   initPhoneBattery();
+  // Fetch Japanese year once on startup (watch can also request it later)
+  fetchJapaneseYear();
 });
-
-// ---------- Clay already handles configuration ----------
-// We don't need to override showConfiguration/webviewclosed
-// because Clay does it for us. But if you need to do extra
-// config handling, you can add listeners here.

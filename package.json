@@ -46,11 +46,39 @@
             "SoundDuringQuietTime",
             "SuppressStartupVibes",
             "SuppressStartupSounds",
-            "PlayerMode"
+            "PlayerMode",
+            "JapaneseYear",
+            "QueryJapaneseYear",
+            "RESET_DEFAULTS"
         ],
         "projectType": "native",
         "resources": {
             "media": [
+                {
+                    "characterRegex": "[\\u0020-\\u007E\\u4EE4\\u548C\\u5E74\\u5E73\\u6210\\u662D\\u5927\\u6B63\\u660E\\u6CBB]",
+                    "file": "fonts/KH-Dot-Kodenmachou-12-Ko.ttf",
+                    "name": "JAPANESE_12",
+                    "targetPlatforms": null,
+                    "type": "font"
+                },
+                {
+                    "file": "data/bluetoot-compressed-16k.wav",
+                    "name": "BT_SOUND",
+                    "targetPlatforms": [
+                        "emery",
+                        "flint"
+                    ],
+                    "type": "raw"
+                },
+                {
+                    "file": "data/start-compressed-8k.wav",
+                    "name": "ANIME_SOUND",
+                    "targetPlatforms": [
+                        "emery",
+                        "flint"
+                    ],
+                    "type": "raw"
+                },
                 {
                     "characterRegex": "[A-Z0-9 .,!?:;'\"\\-_()\\[\\]{}@#$%&*+=/<>]",
                     "file": "fonts/subset.ttf",
@@ -169,24 +197,6 @@
                         "flint"
                     ],
                     "type": "bitmap"
-                },
-                {
-                    "file": "data/bluetoot-compressed-16k.wav",
-                    "name": "BT_SOUND",
-                    "targetPlatforms": [
-                        "emery",
-                        "flint"
-                    ],
-                    "type": "raw"
-                },
-                {
-                    "file": "data/start-compressed-8k.wav",
-                    "name": "ANIME_SOUND",
-                    "targetPlatforms": [
-                        "emery",
-                        "flint"
-                    ],
-                    "type": "raw"
                 },
                 {
                     "file": "images/bt_f0.png",
@@ -731,5 +741,5 @@
             "watchface": true
         }
     },
-    "version": "3.1.3"
+    "version": "3.2.0"
 }
