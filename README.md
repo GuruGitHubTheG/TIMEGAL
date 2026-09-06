@@ -11,6 +11,6 @@ Features Include:
 - Bluetooth Disconnect Animation
 - And More!
 
-*Phone Battery only works if your phone's browser JavaScript environment exposes it.
-**For Supported Watches (Excludes Pebble 2)
+*Phone Battery only works if your phone's browser JavaScript environment exposes it.<br>
+**For Supported Watches (Excludes Pebble 2)<br>
 ***For Supported Watches (Pebble 2 Duo and Pebble Time 2)
